@@ -240,6 +240,12 @@ def calculate_playoff_value(row, year):
 #
 # Also calculate player "values" based on both volume and PER stats in the regular season and in the playoffs, with bonuses for contributing to a team that makes the finals, being an all star, or being the MVP or finals MVP.  Also mark who's a young player and a rookie & second year player each year based on their presence in the stats the previous year -- these are going to the players that I look to predict their growth later.
 
+yearly_stats = parse_bball_ref_common_cols(pd.read_csv('yearly_player_stats/nba_2019.csv'))
+
+
+
+
+
 def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     """
     parse a single year's stats into those i'm looking for
@@ -303,12 +309,14 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         else:
             champ_value = 0
             
-        playoff_value = calculate_playoff_value(row, year)
+        playoff_value = 0
+        if row['EndOfSeason']:
+            playoff_value = calculate_playoff_value(row, year)
         
         league_value = sum(stat_weights[key] * row[key] / league_leaders[key] for key in stat_keys)
         if row['PlayerID'] == mvpid:
             league_value += mvp_value
-        if row['PlayerID'] in all_stars:
+        if row['PlayerID'] in all_stars and row['EndOfSeason']:
             league_value += all_star_value
         return champ_value + league_value + playoff_value
         
@@ -325,6 +333,11 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     ## will sum-up player values later, 
     ## but a player gets value from their contribution to each team
     df = df[df['Team'] != 'TOT']
+    
+    ## then a player only gets credit for the team they're with at the
+    ## end of the season, which is the first one to appear in the list
+    df['EndOfSeason'] = np.zeros(df.shape[0])
+    df['EndOfSeason'][np.logical_not(df.duplicated('PlayerID', keep='first'))] = True
     
     df['YearlyPlayerValue'] = df.apply(calculate_player_value, axis=1)
     df['VeteranStatus'] = df['PlayerID'].apply(set_veteran_status)
