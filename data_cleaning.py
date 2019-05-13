@@ -20,11 +20,13 @@ import pandas as pd
 import seaborn as sns
 import numpy as np
 import matplotlib as mpl
+
 import matplotlib.pyplot as plt
 import datetime
 
 import tensorflow as tf
 
+from tqdm import tqdm
 from glob import glob
 import os, sys
 
@@ -295,31 +297,10 @@ def add_weighted_stat_values(row, leader_stats):
     return sum(stat_weights[key] * row[key] / leader_stats[key] for key in stat_keys)
 
 
-def calculate_playoff_value(row, year):
-    if not row['EndOfSeason']:
-        ### no credit if you weren't with the team at the end of the season
-        return 0
-
-    playoff_stats_by_round = playoff_stats_by_year[year]
-    pid = row['PlayerID']
-    
-    total_value = 0
-    for playoff_round in '1234':
-        # 1 = first round
-        # 2 = conference semifinals
-        # 3 = east/west finals
-        # 4 = nba finals
-        
-        multiplier = playoff_multipliers(playoff_round)
-        round_stats = playoff_stats_by_year[year][playoff_round]
-        if pid in round_stats['PlayerID']:
-            round_leader_stats = get_leader_stats(round_stats)
-            total_value += add_weighted_stat_values(row, round_leader_stats)
-    return total_value
 
 
 
-# + {"code_folding": [38, 99]}
+# + {"code_folding": [38, 64]}
 def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     """
     parse a single year's stats into those i'm looking for
@@ -381,8 +362,37 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
                     
         league_value = add_weighted_stat_values(row, league_leaders)
         return champ_value + league_value
-        
-    found_finals_mvp = False
+
+    def calculate_playoff_value(row):
+        ### no credit if you weren't with the team at the end of the season
+        if not row['EndOfSeason']:
+            return 0
+
+        playoff_stats_by_round = playoff_stats_by_year[year]
+        pid = row['PlayerID']
+
+        total_value = 0
+        for playoff_round in '1234':
+            # 1 = first round
+            # 2 = conference semifinals
+            # 3 = east/west finals
+            # 4 = nba finals
+
+            multiplier = playoff_multipliers(playoff_round)
+            round_stats = playoff_stats_by_year[year][playoff_round]
+            loc = round_stats['PlayerID'] == pid
+            
+            if np.count_nonzero(loc):
+                round_leader_stats = get_leader_stats(round_stats)
+                player_round_stats = round_stats.loc[loc]
+                total_value += add_weighted_stat_values(player_round_stats, round_leader_stats) * multiplier
+        if type(total_value) is int:
+            return total_value
+        else:
+            v = total_value.values
+            assert len(v) == 1
+            return v[0]
+    
     def calculate_awards_value(row):
         """
         how much do we award a player in terms of all stars, mvps, and finals mvps?
@@ -466,11 +476,12 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         num_on_team = np.count_nonzero(df[dset_name].values)
         if num_on_team != 5:
             print("Wrong number of players ({}) on {} All NBA {} Team".format(num_on_team, year, team))
+    ### note -- those datasets will get used later to calculate awards value
     
     df['YearlyRegularSeasonValue'] = df.apply(calculate_regseason_value, axis=1)
     if year < 2019:
         df['YearlyAwardsValue'] = df.apply(calculate_awards_value, axis=1)
-        df['YearlyPlayoffsValue'] = df.apply(calculate_playoff_value, args=(year,), axis=1)
+        df['YearlyPlayoffsValue'] = df.apply(calculate_playoff_value, axis=1)
     else:
         df['YearlyAwardsValue'] = np.zeros(df.shape[0])
         df['YearlyPlayoffsValue'] = np.zeros(df.shape[0])
@@ -506,7 +517,7 @@ yearly_files = yearly_files[2:]
 # -
 
 yearly_data = {}
-for fname in yearly_files:
+for fname in tqdm(yearly_files):
     year = int(fname.split('_')[-1].split('.')[0])
     df, previous_rookie_ids, veteran_ids = read_and_clean_yearly_stats(
         fname, year, veteran_ids, previous_rookie_ids)
@@ -516,5 +527,97 @@ all_years = pd.concat(yearly_data.values())
 
 loc = all_years['PlayerID'] == 'duranke01'
 plt.plot(all_years['Year'].loc[loc], all_years['TotalValue'].loc[loc])
+
+# +
+fig = plt.figure(figsize=(13, 5))
+ax = plt.gca()
+
+prop_cycle = plt.rcParams['axes.prop_cycle']
+colors = prop_cycle.by_key()['color']
+
+for ii, year in enumerate(range(1990, 2018)):
+    df = yearly_data[year]
+    nplayers = df.shape[0]
+    xvals = year - 0.5 + np.random.rand(nplayers)
+    
+    c = colors[ii%len(colors)]
+    
+    ax.scatter(xvals, df['TotalValue'], color=c, s=3)
+
+ax.set_yscale('symlog')
+# -
+
+# ### Now let's also sum up into career stats:
+
+unique_players = np.unique(all_years['PlayerID'].values)
+player_dataset = pd.DataFrame()
+for pid in tqdm(unique_players):
+    rows = all_years.loc[all_years['PlayerID']==pid]
+    output_row = {'PlayerID':pid}
+    output_row['PlayerName'] = rows['PlayerName'].iloc[0]
+    output_row['CareerValue'] = np.sum(rows['TotalValue'].values)
+    output_row['CareerRegularSeasonValue'] = np.sum(rows['YearlyRegularSeasonValue'].values)
+    output_row['CareerPlayoffValue'] = np.sum(rows['YearlyPlayoffsValue'].values)
+    output_row['CareerAwardsValue'] = np.sum(rows['YearlyAwardsValue'].values)
+    output_row['RookieYear'] = rows['Year'].loc[rows['VeteranStatus']==0]
+    player_dataset = player_dataset.append(output_row, ignore_index=True)
+
+
+def find_player_id(player_name):
+    possibilities = unique_players['PlayerName'] == player_name
+    if np.count_nonzero(possibilities) == 1:
+        return unique_players['PlayerID'].loc[possibilities].values[0]
+    elif np.count_nonzero(possibilities) > 1:
+        print("Many options:")
+        values = unique_players['CareerValue'].loc[possibilities]
+        pids = []
+        for index, row in unique_players.loc[possibilities].iterrows():
+            print('\t{} with a total value of {}'.format(row['PlayerID'], row['CareerValue']))
+            pids.append(row['PlayerID'].value)
+        print("Returning best career")
+        return pids[np.argmax(values)]
+    else:
+        print("No exact matches... possibilities:")
+        from fuzzywuzzy import process
+        possibilities = process.extract(player_name, unique_players['PlayerName'].values, limit=10)
+        for poss in possibilities:
+            print("\t",poss[0])
+        return None
+
+
+# +
+xticks = range(0, 30, 5)
+xticklabels = [str(ii) for ii in range(1990, 2021, 5)]
+
+def plot_player_track(pid, y='TotalValue'):
+    fig = plt.figure(figsize=(13, 5))
+    ax = plt.gca()
+
+    loc = all_years['PlayerID']==pid
+    name = all_years['PlayerName'].loc[loc].values[0]
+    sns.boxplot(data=all_years, x='Year', y=y, ax=ax)
+
+    ax.plot(all_years['Year'].loc[loc], all_years[y].loc[loc], label=name)
+    
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xticklabels)
+# -
+
+
+
+# ### OK, I'm not sure if this is a great way to value players yet, but let's forge ahead anyway!
+#
+# What I want to do is:
+# 1. Pick out the stats of first and second year players
+#     --> Those are my features StatX-FirstYear and StatX-SecondYear
+# 2.  Train to predict their total value over the length of their career.
+#
+# I need to be extra careful about my test/train sets though, because I want to make sure that I have some (but not all) of the stars in the my dataset.
+#
+# So I'll need to sort by the total value of a player and then pick ever Nth or something
+
+player_dataset
+
+(player_dataset['CareerPlayoffValue'] == 0).all()
 
 
