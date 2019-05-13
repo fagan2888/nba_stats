@@ -21,6 +21,7 @@ import seaborn as sns
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import datetime
 
 import tensorflow as tf
 
@@ -146,7 +147,7 @@ column_renamer = {'Pos':'Position',
 
 def parse_bball_ref_common_cols(df):
     df.rename(columns=column_renamer, inplace=True)
-    df['PlayerName'] = df['Player'].apply(lambda x:  x.split('\\')[0])
+    df['PlayerName'] = df['Player'].apply(lambda x:  x.split('\\')[0].replace('*', ''))
     df['PlayerID'] = df['Player'].apply(lambda x:  x.split('\\')[1])
     
     df.drop(columns=[k for k in ['Player'] if k in df.keys()], inplace=True)
@@ -170,7 +171,7 @@ finals_team_data['Runner-Up'] = finals_team_data['Runner-Up'].apply(lambda x: lo
 finals_team_data.drop(columns=['Lg'], inplace=True)
 
 hof = pd.read_table('hof_players.txt', delim_whitespace=True)
-hof['Name'] = [fn + ' ' + ln for (fn, ln) in zip(hof_players['FirstName'], hof_players['LastName'])]
+hof['Name'] = [fn + ' ' + ln for (fn, ln) in zip(hof['FirstName'], hof['LastName'])]
 hof.drop(columns=['FirstName', 'LastName', 'Height(M)'], inplace=True)
 hof_names = np.array(hof['Name'].values)
 
@@ -315,10 +316,10 @@ def calculate_playoff_value(row, year):
             round_leader_stats = get_leader_stats(round_stats)
             total_value += add_weighted_stat_values(row, round_leader_stats)
     return total_value
-            
 
 
-# + {"code_folding": [38, 62, 99]}
+
+# + {"code_folding": [38, 99]}
 def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     """
     parse a single year's stats into those i'm looking for
@@ -326,7 +327,8 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     also indicate whether a player is a rookie (0), second year (1), or veteran player (2)
     """
     df = parse_bball_ref_common_cols(pd.read_csv(fname))
-    df = add_additional_stats(df)    
+    df = add_additional_stats(df)
+    df['Year'] = datetime.datetime(year, 6, 1)
     
     if year < 2019:
         champ = finals_team_data['Champion'][year]
@@ -351,11 +353,10 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         finals_mvp = None
         dpoy = None
         sixth_man = None
-        all_nba_players = None
+        all_nba_players = {'1st':[], '2nd':[], '3rd':[]}
 
     all_stars = all_star_pids[year]   
     league_leaders = get_leader_stats(df)
-    found_finals_mvp = False
 
     def calculate_regseason_value(row):          
         if row['Team'] in [champ, runnerup]:
@@ -381,6 +382,7 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         league_value = add_weighted_stat_values(row, league_leaders)
         return champ_value + league_value
         
+    found_finals_mvp = False
     def calculate_awards_value(row):
         """
         how much do we award a player in terms of all stars, mvps, and finals mvps?
@@ -396,7 +398,7 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
             awards_value += all_star_value
             
         for team in ['1st', '2nd', '3rd']:
-            if row['PlayerName'] in all_nba_players[team]:
+            if row['isAllNBA_{}'.format(team)]:
                 awards_value += all_nba_values[team]
         
         if row['PlayerID'] == mvpid:
@@ -408,14 +410,9 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         if row['PlayerID'] == sixth_man:
             awards_value += sixth_man_value
             
-        name = row['PlayerName'].rsplit(maxsplit=1)
-        name = name[0][0] + '. ' + name[1]
-        if name == finals_mvp:
-            if found_finals_mvp:
-                print("!! -- found two Finals MVPs in {}".format(year))
+        if row['isFMVP']:
             awards_value += finals_mvp_value
-            found_finals_mvp = True
-        
+            
         return awards_value
         
     def set_veteran_status(pid):
@@ -425,6 +422,22 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
             return 2
         else:
             return 0
+    
+    def set_isFMVP(row):
+        pname = row['PlayerName']
+        team = row['Team']
+        name = pname.rsplit(maxsplit=1)
+        name = name[0][0] + '. ' + name[1]
+        if name == finals_mvp and team == champ:
+            return True
+        else:
+            return False
+        
+    def set_allNBAteam(pname, team):
+        if pname in all_nba_players[team]:
+            return True
+        else:
+            return False
     
     
     ## drop the "total" values of players now (not earlier, since we want 
@@ -440,16 +453,36 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     with_at_eos[msk] = True
     df['EndOfSeason'] = with_at_eos
     
+    ## set whether a player was the finals mvp:
+    df['isFMVP'] = df.apply(set_isFMVP, axis=1)
+    num_fmvp = np.count_nonzero(df['isFMVP'].values)
+    if num_fmvp != 1:
+        print("Wrong number of FMVPs ({}) in year {}".format(num_fmvp, year))
+    
+    ## set whether a player made each of the all NBA teams:
+    for team in ['1st', '2nd', '3rd']:
+        dset_name = 'isAllNBA_{}'.format(team)
+        df[dset_name] = df['PlayerName'].apply(set_allNBAteam, args=(team,))
+        num_on_team = np.count_nonzero(df[dset_name].values)
+        if num_on_team != 5:
+            print("Wrong number of players ({}) on {} All NBA {} Team".format(num_on_team, year, team))
+    
     df['YearlyRegularSeasonValue'] = df.apply(calculate_regseason_value, axis=1)
-    df['YearlyAwardsValue'] = df.apply(calculate_awards_value, axis=1)
-    df['YearlyPlayoffsValue'] = df.apply(calculate_playoff_value, args=(year,), axis=1)
-
+    if year < 2019:
+        df['YearlyAwardsValue'] = df.apply(calculate_awards_value, axis=1)
+        df['YearlyPlayoffsValue'] = df.apply(calculate_playoff_value, args=(year,), axis=1)
+    else:
+        df['YearlyAwardsValue'] = np.zeros(df.shape[0])
+        df['YearlyPlayoffsValue'] = np.zeros(df.shape[0])
+        
     df['VeteranStatus'] = df['PlayerID'].apply(set_veteran_status)
     df['YoungPlayer'] = df['Age'].apply(lambda x:  x <= 23)
     
     # everyone who was a rookie last year will be a veteran next year
     next_veteran_ids = np.union1d(veteran_ids, previous_rookie_ids)
     rookie_ids = np.array(df['PlayerID'].loc[df['VeteranStatus']==0].values)
+    
+    df['TotalValue'] = df['YearlyRegularSeasonValue'] + df['YearlyAwardsValue'] + df['YearlyPlayoffsValue']
     
     return df, rookie_ids, next_veteran_ids
 
@@ -472,14 +505,16 @@ previous_rookie_ids = np.setdiff1d(year_two_ids, year_one_ids)
 yearly_files = yearly_files[2:]
 # -
 
-dataframes = {}
+yearly_data = {}
 for fname in yearly_files:
     year = int(fname.split('_')[-1].split('.')[0])
     df, previous_rookie_ids, veteran_ids = read_and_clean_yearly_stats(
         fname, year, veteran_ids, previous_rookie_ids)
     
-    dataframes[year] = df
+    yearly_data[year] = df
+all_years = pd.concat(yearly_data.values())
 
-
+loc = all_years['PlayerID'] == 'duranke01'
+plt.plot(all_years['Year'].loc[loc], all_years['TotalValue'].loc[loc])
 
 
