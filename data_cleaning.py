@@ -68,7 +68,7 @@ team_long_names = [k.strip() for k in """Atlanta Hawks
                     Seattle SuperSonics
                     Baltimore Bullets""".split('\n')]
 
-team_short_names = """ATL  
+team_short_names = [k.strip() for k in """ATL  
                     NJN  
                     BKN  
                     BOS  
@@ -101,7 +101,7 @@ team_short_names = """ATL
                     WAS 
                     WAS
                     SEA 
-                    BAL""".split()
+                    BAL""".split()]
 
 long_to_short = dict(zip(team_long_names, team_short_names))
 short_to_long = dict(zip(team_short_names, team_long_names))
@@ -114,7 +114,8 @@ stat_weights = {'PTS': 2.0,
                 'TRB': 1.0,
                 'ORB': 0.5, 
                 'STL': 1.25,
-                'TOV': -1.0}
+                'TOV': -2.0,
+                'MissedShots':-0.5}
 base_stat_keys = list(stat_weights.keys())
 
 for k in base_stat_keys:
@@ -124,11 +125,15 @@ stat_keys = stat_weights.keys()
 
 champ_multiplier = 0.66
 ru_multiplier = 0.33
-playoff_values = dict([(str(i), 0.1*np.sqrt(i)) for i in range(1, 5)])
+finals_minutes_multiplier = 0.2
+playoff_multipliers = lambda ii:  0.1*np.sqrt(int(ii))
 
-mvp_value = 7.5
+mvp_value = 8
+dpoy_value = 4
+sixth_man_value = 2
 finals_mvp_value = 4
 all_star_value = 1.5
+all_nba_values = {'1st':3, '2nd':2, '3rd':1}
 
 # +
 column_renamer = {'Pos':'Position', 
@@ -147,7 +152,8 @@ def parse_bball_ref_common_cols(df):
     df.drop(columns=[k for k in ['Player'] if k in df.keys()], inplace=True)
     return df
 
-def add_per_stats(df):
+def add_additional_stats(df):
+    df['MissedShots'] = df['FGA'] - df['FG']
     for key in base_stat_keys:
         df[key + '_PER36'] = 36.0 * df[key] / df['MinutesPlayed']
     return df
@@ -155,7 +161,7 @@ def add_per_stats(df):
 
 # -
 
-# #### Read info about teams that made it to the finals, players that are in the HOF, MVP winners, and players that made All-Star teams...
+# #### Read info about teams that made it to the finals, players that are in the HOF, MVP winners, players that made All-NBA and All-Star teams, DPOYs, and Sixth man awards
 
 finals_team_data = pd.read_csv('finals_stats.csv', index_col='Year')
 finals_team_data.dropna(axis='index', inplace=True)
@@ -168,13 +174,22 @@ hof['Name'] = [fn + ' ' + ln for (fn, ln) in zip(hof_players['FirstName'], hof_p
 hof.drop(columns=['FirstName', 'LastName', 'Height(M)'], inplace=True)
 hof_names = np.array(hof['Name'].values)
 
-mvps = pd.read_csv('mvp_stats.csv')
-mvps = parse_bball_ref_common_cols(mvps)
+mvps = parse_bball_ref_common_cols(pd.read_csv('mvp_stats.csv'))
 mvps['Year'] = mvps['Season'].apply(lambda x: int(x.split('-')[0]) + 1)
 mvps.drop(columns=['Season','Team'], inplace=True)
 mvps.set_index('Year', inplace=True)
 
-all_star_pids = {}
+dpoys = parse_bball_ref_common_cols(pd.read_csv('dpoy.csv'))
+dpoys['Year'] = dpoys['Season'].apply(lambda x: int(x.split('-')[0]) + 1)
+dpoys.drop(columns=['Season','Team'], inplace=True)
+dpoys.set_index('Year', inplace=True)
+
+sixth_man_winners = parse_bball_ref_common_cols(pd.read_csv('sixth_man.csv'))
+sixth_man_winners['Year'] = sixth_man_winners['Season'].apply(lambda x: int(x.split('-')[0]) + 1)
+sixth_man_winners.set_index('Year', inplace=True)
+sixth_man_winners.drop(columns=['Lg', 'Voting', 'Season'], inplace=True)
+
+all_star_pids = {1999:np.array([])}  ### no all-star game in 1999
 all_star_files = sorted(glob('all_stars/*.csv'))
 for fname in all_star_files:
     year = int(fname.split('/')[-1].split('.')[0])
@@ -183,13 +198,36 @@ for fname in all_star_files:
     ## I just want to know if they made it or not
     all_star_pids[year] = adf['PlayerID'].values
 
+# +
+all_nba_teams_by_year = {}
+all_nba_teams = pd.read_csv('all_nba_teams.csv')
+all_nba_teams['Year'] = all_nba_teams['Season'].apply(lambda x: int(x.split('-')[0]) + 1)
+all_nba_teams.drop(columns=['Season', 'Lg'], inplace=True)
+all_nba_teams.rename(columns={'Tm':'Team'}, inplace=True)
+# all_nba_teams.set_index('Year', inplace=True)
+
+all_nba_players_by_year = {}
+for year in np.unique(all_nba_teams['Year']):
+    teams_this_year = all_nba_teams.loc[all_nba_teams['Year'] == year]
+    all_nba_players_by_year[year] = {}
+    for idx, row in teams_this_year.iterrows():
+        team = row['Team']
+        these_players = []
+        for val in row[1:-1]:
+            if val.endswith(' C'):
+                val = val[:-2]
+            elif val.endswith(' F'):
+                val = val[:-2]
+            elif val.endswith(' G'):
+                val = val[:-2]
+            these_players.append(val)
+        assert len(these_players) == 5        
+        all_nba_players_by_year[year][team] = these_players
+
+
+# -
+
 # #### Read and parse playoff stats for reference later:
-
-df = pd.read_csv('playoff_player_stats/2018/round4.csv', header=[0, 1])
-
-new = [''.join(col).strip() for col in pdf.columns.values]
-
-
 
 # +
 def read_and_clean_playoff_year(year):
@@ -211,7 +249,6 @@ def read_and_clean_playoff_round_stats(fname):
         print("No file for {}".format(fname))
         return pd.DataFrame(columns=['PlayerID'])
     
-#     print("Reading {}".format(fname))
     df = pd.read_csv(fname, header=[0, 1])
     new = [''.join(col).strip() for col in df.columns.values]
     for ii, n in enumerate(new):
@@ -227,44 +264,61 @@ def read_and_clean_playoff_round_stats(fname):
             print("don't know how to rename {}".format(n))
     df.columns = new
     
-#     print(list(df.keys()))
-    df = add_per_stats(parse_bball_ref_common_cols(df))
+    df = add_additional_stats(parse_bball_ref_common_cols(df))
     return df     
 
 
 # -
 
 playoff_stats_by_year = {}
-playoff_years = range(1988, 2019)
+playoff_years = range(1990, 2019)
 for year in playoff_years:
     playoff_stats_by_year[year] = read_and_clean_playoff_year(year)
 
 
-# +
+# #### Now read and parse yearly stats
+#
+# Also calculate player "values" based on both volume and PER stats in the regular season and in the playoffs, with bonuses for contributing to a team that makes the finals, being an all star, or being the MVP or finals MVP.  Also mark who's a young player and a rookie & second year player each year based on their presence in the stats the previous year -- these are going to the players that I look to predict their growth later.
+
+def get_leader_stats(df, msk=None):
+    leader_values = {}
+    for key in stat_keys:
+        if msk is None:
+            leader_values[key] = df[key].max()
+        else:
+            leader_values[key] = df[key].loc[msk].max()
+    return leader_values
+
+
+def add_weighted_stat_values(row, leader_stats):
+    return sum(stat_weights[key] * row[key] / leader_stats[key] for key in stat_keys)
+
+
 def calculate_playoff_value(row, year):
+    if not row['EndOfSeason']:
+        ### no credit if you weren't with the team at the end of the season
+        return 0
+
     playoff_stats_by_round = playoff_stats_by_year[year]
     pid = row['PlayerID']
+    
+    total_value = 0
     for playoff_round in '1234':
         # 1 = first round
         # 2 = conference semifinals
         # 3 = east/west finals
         # 4 = nba finals
         
-        ##TODO continue here
+        multiplier = playoff_multipliers(playoff_round)
+        round_stats = playoff_stats_by_year[year][playoff_round]
+        if pid in round_stats['PlayerID']:
+            round_leader_stats = get_leader_stats(round_stats)
+            total_value += add_weighted_stat_values(row, round_leader_stats)
+    return total_value
+            
 
 
-# -
-
-# #### Now read and parse yearly stats
-#
-# Also calculate player "values" based on both volume and PER stats in the regular season and in the playoffs, with bonuses for contributing to a team that makes the finals, being an all star, or being the MVP or finals MVP.  Also mark who's a young player and a rookie & second year player each year based on their presence in the stats the previous year -- these are going to the players that I look to predict their growth later.
-
-yearly_stats = parse_bball_ref_common_cols(pd.read_csv('yearly_player_stats/nba_2019.csv'))
-
-
-
-
-
+# + {"code_folding": [38, 62, 99]}
 def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     """
     parse a single year's stats into those i'm looking for
@@ -272,13 +326,7 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     also indicate whether a player is a rookie (0), second year (1), or veteran player (2)
     """
     df = parse_bball_ref_common_cols(pd.read_csv(fname))
-    df = add_per_stats(df)
-    
-    def get_leaders(msk):
-        leader_values = {}
-        for key in stat_keys:
-             leader_values[key] = df[key].loc[msk].max()
-        return leader_values
+    df = add_additional_stats(df)    
     
     if year < 2019:
         champ = finals_team_data['Champion'][year]
@@ -287,57 +335,88 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         champ_players = df['Team'] == champ
         ru_players = df['Team'] == runnerup    
   
-        champ_leaders = get_leaders(champ_players)
-        ru_leaders = get_leaders(ru_players)
+        champ_leaders = get_leader_stats(df, msk=champ_players)
+        ru_leaders = get_leader_stats(df, msk=ru_players)
         
-        fmpv = finals_team_data['Finals MVP'][year]
+        dpoy = dpoys['PlayerID'][year]
+        sixth_man = sixth_man_winners['PlayerID'][year]
         mvpid = mvps['PlayerID'][year]
+        finals_mvp = finals_team_data['Finals MVP'][year]
+        all_nba_players = all_nba_players_by_year[year]
     else:
         champ = None
         runnerup = None
+        
         mvpid = None
+        finals_mvp = None
+        dpoy = None
+        sixth_man = None
+        all_nba_players = None
 
     all_stars = all_star_pids[year]   
-    league_leaders = get_leaders(np.ones(df.shape[0], dtype=bool))
+    league_leaders = get_leader_stats(df)
+    found_finals_mvp = False
 
-    found_fmvp = False
-    def calculate_player_value(row):          
+    def calculate_regseason_value(row):          
         if row['Team'] in [champ, runnerup]:
-            ## did you contribute to a team that made it to the finals?
-            champ_value =  0.5 * (row['MinutesPlayed']/3000 +  
-                           row['GamesStarted']/82 + 
-                           0.33 * row['GamesPlayed']/82)
+            ## did you play significant minutes on a team that made it to the finals?
+            champ_value =  finals_minutes_multiplier * (
+                            row['MinutesPlayed']/3000 +  
+                            row['GamesStarted']/82 + 
+                            0.33 * row['GamesPlayed']/82)
             
+            ## did you contribute significantly in terms of pts, rbs, etc?
             if row['Team'] == champ:
                 multiplier = champ_multiplier
                 leader_values = champ_leaders                
             else:
                 multiplier = ru_multiplier
                 leader_values = ru_leaders
-
-            pname = row['PlayerName'].rsplit(num=1)
-            pname = pname[0][0]+'. '+pname[1]
-            if pname == fmvp:
-                if found_fmvp:
-                    print("!! -- found two Finals MVPs in {}".format(year))
-                champ_value += finals_mvp_value
-                found_fmvp = True
                 
-            champ_value += sum(stat_weights[key] * row[key] / leader_values[key] for key in stat_keys)
+            champ_value += add_weighted_stat_values(row, leader_values)
             champ_value *= multiplier
         else:
             champ_value = 0
-            
-        playoff_value = 0
-        if row['EndOfSeason']:
-            playoff_value = calculate_playoff_value(row, year)
+                    
+        league_value = add_weighted_stat_values(row, league_leaders)
+        return champ_value + league_value
         
-        league_value = sum(stat_weights[key] * row[key] / league_leaders[key] for key in stat_keys)
+    def calculate_awards_value(row):
+        """
+        how much do we award a player in terms of all stars, mvps, and finals mvps?
+        """
+        
+        if not row['EndOfSeason']:
+            ## only get credit for awards once
+            ## (on the team you end the season with)
+            return 0
+        
+        awards_value = 0
+        if row['PlayerID'] in all_stars:
+            awards_value += all_star_value
+            
+        for team in ['1st', '2nd', '3rd']:
+            if row['PlayerName'] in all_nba_players[team]:
+                awards_value += all_nba_values[team]
+        
         if row['PlayerID'] == mvpid:
-            league_value += mvp_value
-        if row['PlayerID'] in all_stars and row['EndOfSeason']:
-            league_value += all_star_value
-        return champ_value + league_value + playoff_value
+            awards_value += mvp_value
+            
+        if row['PlayerID'] == dpoy:
+            awards_value += dpoy_value
+            
+        if row['PlayerID'] == sixth_man:
+            awards_value += sixth_man_value
+            
+        name = row['PlayerName'].rsplit(maxsplit=1)
+        name = name[0][0] + '. ' + name[1]
+        if name == finals_mvp:
+            if found_finals_mvp:
+                print("!! -- found two Finals MVPs in {}".format(year))
+            awards_value += finals_mvp_value
+            found_finals_mvp = True
+        
+        return awards_value
         
     def set_veteran_status(pid):
         if pid in previous_rookie_ids:
@@ -347,6 +426,7 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         else:
             return 0
     
+    
     ## drop the "total" values of players now (not earlier, since we want 
     ## to use total stats to normalize our value added above)
     ## will sum-up player values later, 
@@ -355,10 +435,15 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     
     ## then a player only gets credit for the team they're with at the
     ## end of the season, which is the first one to appear in the list
-    df['EndOfSeason'] = np.zeros(df.shape[0])
-    df['EndOfSeason'][np.logical_not(df.duplicated('PlayerID', keep='first'))] = True
+    with_at_eos = np.zeros(df.shape[0])
+    msk = np.logical_not(df.duplicated('PlayerID', keep='first'))
+    with_at_eos[msk] = True
+    df['EndOfSeason'] = with_at_eos
     
-    df['YearlyPlayerValue'] = df.apply(calculate_player_value, axis=1)
+    df['YearlyRegularSeasonValue'] = df.apply(calculate_regseason_value, axis=1)
+    df['YearlyAwardsValue'] = df.apply(calculate_awards_value, axis=1)
+    df['YearlyPlayoffsValue'] = df.apply(calculate_playoff_value, args=(year,), axis=1)
+
     df['VeteranStatus'] = df['PlayerID'].apply(set_veteran_status)
     df['YoungPlayer'] = df['Age'].apply(lambda x:  x <= 23)
     
@@ -368,10 +453,9 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     
     return df, rookie_ids, next_veteran_ids
 
-
+# +
 yearly_files = sorted(glob('yearly_player_stats/*.csv'))
 
-# +
 ### figure out who's a rookie etc at the beginning of my time....
 year_one_df = parse_bball_ref_common_cols(pd.read_csv(yearly_files[0]))
 year_two_df = parse_bball_ref_common_cols(pd.read_csv(yearly_files[1]))
@@ -384,14 +468,18 @@ veteran_ids = np.intersect1d(year_one_ids, year_two_ids)
 
 ## if you're only in year 2, you're a second year player in year 3
 previous_rookie_ids = np.setdiff1d(year_two_ids, year_one_ids)
+
+yearly_files = yearly_files[2:]
 # -
 
 dataframes = {}
-for fname in yearly_files[2:]:
+for fname in yearly_files:
     year = int(fname.split('_')[-1].split('.')[0])
     df, previous_rookie_ids, veteran_ids = read_and_clean_yearly_stats(
         fname, year, veteran_ids, previous_rookie_ids)
     
     dataframes[year] = df
+
+
 
 
