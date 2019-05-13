@@ -95,7 +95,7 @@ team_short_names = [k.strip() for k in """ATL
                     OKC  
                     ORL  
                     PHI  
-                    PHX  
+                    PHO 
                     POR  
                     SAC  
                     SAS  
@@ -109,6 +109,10 @@ team_short_names = [k.strip() for k in """ATL
 long_to_short = dict(zip(team_long_names, team_short_names))
 short_to_long = dict(zip(team_short_names, team_long_names))
 
+# first_year = datetime.datetime(1990, 1, 1)
+first_year = 1990
+years_to_xvals = lambda years: years - first_year
+
 # +
 ## how do we weight stats when calculating a players value?  larger number = more weight
 stat_weights = {'PTS': 2.0, 
@@ -118,7 +122,8 @@ stat_weights = {'PTS': 2.0,
                 'ORB': 0.5, 
                 'STL': 1.25,
                 'TOV': -2.0,
-                'MissedShots':-0.5}
+#                 'MissedShots':-0.5
+               }
 base_stat_keys = list(stat_weights.keys())
 
 for k in base_stat_keys:
@@ -157,14 +162,105 @@ def parse_bball_ref_common_cols(df):
 
 def add_additional_stats(df):
     df['MissedShots'] = df['FGA'] - df['FG']
+    played = df['MinutesPlayed'] > 0
+    
+    output = {}
     for key in base_stat_keys:
-        df[key + '_PER36'] = 36.0 * df[key] / df['MinutesPlayed']
+#         df[key + '_PER36'] = 36.0 * df[key] / df['MinutesPlayed']
+        vout = np.zeros(df[key].size)
+        vout[played] = 36.0 * df[key].loc[played]/df['MinutesPlayed'].loc[played]
+        df[key+'_PER36'] = vout
+    return df
+
+
+def combine_traded_player(rows):
+#     out = pd.DataFrame(columns=rows.keys())
+    out = dict([(k,None) for k in rows.keys() if not k.endswith('_PER36')])
+
+#     ['Rk', 'Position', 'Age', 'Team', 'GamesPlayed', 'GamesStarted',
+#        'MinutesPlayed', 'FG', 'FGA', 'FG%', '3P', '3PA', '3P%', '2P', '2PA',
+#        '2P%', 'eFG%', 'FT', 'FTA', 'FT%', 'ORB', 'DRB', 'TRB', 'AST', 'STL',
+#        'BLK', 'TOV', 'Fouls', 'PTS', 'PlayerName', 'PlayerID', 'MissedShots',
+#        'Year', 'isFMVP',
+#        'isAllNBA_1st', 'isAllNBA_2nd', 'isAllNBA_3rd',
+#        'YearlyRegularSeasonValue', 'YearlyAwardsValue', 'YearlyPlayoffsValue',
+#        'VeteranStatus', 'isYoungPlayer', 'TotalValue'],
+    
+    out['Team'] = 'TOT'
+    
+    ## raw stats -- simply sum these up
+    to_sum = ['GamesPlayed', 'GamesStarted', 'MinutesPlayed', 
+              'FG', 'FGA', '3P', '3PA', '2P', '2PA', 'FT', 'FTA', 
+              'ORB', 'DRB', 'TRB', 'AST', 'STL', 'BLK', 'TOV', 'Fouls', 
+              'PTS', 'MissedShots', 'YearlyRegularSeasonValue', 
+              'YearlyAwardsValue', 'YearlyPlayoffsValue', 'TotalValue']
+    
+    for k in to_sum:
+        out[k] = rows[k].sum()
+    
+    to_any = ['isFMVP', 'isAllNBA_1st', 'isAllNBA_2nd', 'isAllNBA_3rd', 'isYoungPlayer']
+    for k in to_any:
+        out[k] = rows[k].any(axis=None)
+
+    ## Recalculate these
+    to_recalc_simple = ['3P%', '2P%', 'FT%']
+    for k in to_recalc_simple:
+        attempts = k[:-1]+'A'
+        makes = k[:-1]
+        out[k] = out[makes]*1.0/out[attempts]
+        
+    ## calculate eFG% by hand
+    out['eFG%'] = (out['FG'] + 0.5*out['3P'])/out['FGA']
+    
+    ## combine all the positions:
+    positions = np.unique(rows['Position'].values)
+    out['Position'] = ', '.join(positions)
+    
+    ## Take the best rank of the player...kinda meaningless since I never use it
+    out['Rk'] = rows['Rk'].min()
+    
+    ## these should be the same for the player:
+    check_equal = ['Age', 'Year', 'PlayerName', 'PlayerID', 'VeteranStatus']
+    
+    for k in check_equal:
+        vals = rows[k].values
+        assert (vals == vals[0]).all(), "assert failed with key = {}:\n{}".format(k, vals)
+        out[k] = vals[0]
+        
+    df = pd.DataFrame(out, index=[0])
+    
+    ## now add back the PER36
+    df = add_additional_stats(df)
+    
+    assert df.shape[0] == 1
     return df
 
 
 # -
 
-# #### Read info about teams that made it to the finals, players that are in the HOF, MVP winners, players that made All-NBA and All-Star teams, DPOYs, and Sixth man awards
+def find_player_id(player_name):
+    possibilities = player_dataset['PlayerName'] == player_name
+    if np.count_nonzero(possibilities) == 1:
+        return player_dataset['PlayerID'].loc[possibilities].values[0]
+    elif np.count_nonzero(possibilities) > 1:
+        print("Many options:")
+        values = player_dataset['CareerValue'].loc[possibilities]
+        pids = []
+        for index, row in player_dataset.loc[possibilities].iterrows():
+            print('\t{} with a total value of {}'.format(row['PlayerID'], row['CareerValue']))
+            pids.append(row['PlayerID'].value)
+        print("Returning best career")
+        return pids[np.argmax(values)]
+    else:
+        print("No exact matches... possibilities:")
+        from fuzzywuzzy import process
+        possibilities = process.extract(player_name, player_dataset['PlayerName'].values, limit=10)
+        for poss in possibilities:
+            print("\t",poss[0])
+        return None
+
+
+# ## Read info about teams that made it to the finals, players that are in the HOF, MVP winners, players that made All-NBA and All-Star teams, DPOYs, and Sixth man awards
 
 finals_team_data = pd.read_csv('finals_stats.csv', index_col='Year')
 finals_team_data.dropna(axis='index', inplace=True)
@@ -230,7 +326,7 @@ for year in np.unique(all_nba_teams['Year']):
 
 # -
 
-# #### Read and parse playoff stats for reference later:
+# ## Read and parse playoff stats for reference later:
 
 # +
 def read_and_clean_playoff_year(year):
@@ -279,7 +375,7 @@ for year in playoff_years:
     playoff_stats_by_year[year] = read_and_clean_playoff_year(year)
 
 
-# #### Now read and parse yearly stats
+# # Now read and parse yearly stats
 #
 # Also calculate player "values" based on both volume and PER stats in the regular season and in the playoffs, with bonuses for contributing to a team that makes the finals, being an all star, or being the MVP or finals MVP.  Also mark who's a young player and a rookie & second year player each year based on their presence in the stats the previous year -- these are going to the players that I look to predict their growth later.
 
@@ -287,9 +383,12 @@ def get_leader_stats(df, msk=None):
     leader_values = {}
     for key in stat_keys:
         if msk is None:
-            leader_values[key] = df[key].max()
+            v = np.nanmax(df[key])
         else:
-            leader_values[key] = df[key].loc[msk].max()
+            v = np.nanmax(df[key].loc[msk])
+        if np.isnan(v):
+            v = 0
+        leader_values[key] = v
     return leader_values
 
 
@@ -297,10 +396,7 @@ def add_weighted_stat_values(row, leader_stats):
     return sum(stat_weights[key] * row[key] / leader_stats[key] for key in stat_keys)
 
 
-
-
-
-# + {"code_folding": [38, 64]}
+# + {"code_folding": [43, 108, 140, 148, 158]}
 def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     """
     parse a single year's stats into those i'm looking for
@@ -309,7 +405,7 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
     """
     df = parse_bball_ref_common_cols(pd.read_csv(fname))
     df = add_additional_stats(df)
-    df['Year'] = datetime.datetime(year, 6, 1)
+    df['Year'] = int(year) #datetime.datetime(year, 6, 1)
     
     if year < 2019:
         champ = finals_team_data['Champion'][year]
@@ -318,6 +414,11 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         champ_players = df['Team'] == champ
         ru_players = df['Team'] == runnerup    
   
+        if not champ_players.any():
+            print("No players on championship team in {}".format(year))
+        if not ru_players.any():
+            print("No players on runner-up team in {}".format(year))
+
         champ_leaders = get_leader_stats(df, msk=champ_players)
         ru_leaders = get_leader_stats(df, msk=ru_players)
         
@@ -372,11 +473,12 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         pid = row['PlayerID']
 
         total_value = 0
-        for playoff_round in '1234':
+        for playoff_round in range(1, 5):
             # 1 = first round
             # 2 = conference semifinals
             # 3 = east/west finals
             # 4 = nba finals
+            playoff_round = str(playoff_round)
 
             multiplier = playoff_multipliers(playoff_round)
             round_stats = playoff_stats_by_year[year][playoff_round]
@@ -384,14 +486,24 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
             
             if np.count_nonzero(loc):
                 round_leader_stats = get_leader_stats(round_stats)
-                player_round_stats = round_stats.loc[loc]
-                total_value += add_weighted_stat_values(player_round_stats, round_leader_stats) * multiplier
-        if type(total_value) is int:
-            return total_value
-        else:
-            v = total_value.values
-            assert len(v) == 1
-            return v[0]
+                player_round_stats = round_stats.loc[loc]                
+                to_add = add_weighted_stat_values(player_round_stats, round_leader_stats).values[0] * multiplier
+                
+                if np.isnan(to_add):
+                    print("Going to add a NaN for pid = {}, year = {}, round = {}".format(pid, year, playoff_round))
+                    vals = round_leader_stats.values()
+                    if pd.isnull(vals):
+                        print('got a NaN in leader stats, year {}, round {}'.format(year, playoff_round))
+                        print(round_leader_stats)
+                    if pd.isnull(player_round_stats).any(axis=None):
+                        print("got a NaN in player stats, pid = {}, year = {}, round = {}".format(pid, year, playoff_round))
+                        for colname in stat_keys:
+                            print(colname, player_round_stats[colname])
+#                             if pd.isnull(player_round_stats[colname]):
+#                                 print(colname, player_round_stats[colname])
+                    raise TypeError("got a nan")
+                total_value += to_add
+        return total_value
     
     def calculate_awards_value(row):
         """
@@ -476,7 +588,7 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         num_on_team = np.count_nonzero(df[dset_name].values)
         if num_on_team != 5:
             print("Wrong number of players ({}) on {} All NBA {} Team".format(num_on_team, year, team))
-    ### note -- those datasets will get used later to calculate awards value
+    ### note -- these datasets will get used later to calculate awards value
     
     df['YearlyRegularSeasonValue'] = df.apply(calculate_regseason_value, axis=1)
     if year < 2019:
@@ -487,15 +599,40 @@ def read_and_clean_yearly_stats(fname, year, veteran_ids, previous_rookie_ids):
         df['YearlyPlayoffsValue'] = np.zeros(df.shape[0])
         
     df['VeteranStatus'] = df['PlayerID'].apply(set_veteran_status)
-    df['YoungPlayer'] = df['Age'].apply(lambda x:  x <= 23)
+    df['isYoungPlayer'] = df['Age'] <= 23
     
     # everyone who was a rookie last year will be a veteran next year
     next_veteran_ids = np.union1d(veteran_ids, previous_rookie_ids)
     rookie_ids = np.array(df['PlayerID'].loc[df['VeteranStatus']==0].values)
     
     df['TotalValue'] = df['YearlyRegularSeasonValue'] + df['YearlyAwardsValue'] + df['YearlyPlayoffsValue']
+
+    ## no longer need to know whether it's the EndOfSeason row
+    df.drop(columns=['EndOfSeason'], inplace=True)
     
-    return df, rookie_ids, next_veteran_ids
+    ## now handle players that are duplicated (i.e. that were on multiple teams in a given year because of trades)
+    ## I'm going to just sum those up basically...
+    is_a_duplicate_row = df.duplicated('PlayerID', keep=False)
+    
+    players_traded = np.unique(df['PlayerID'].loc[is_a_duplicate_row])
+    print("Now dealing with {} players that were traded and appear more than once...".format(
+        players_traded.size))
+    
+    df_with_no_dupes = df.drop_duplicates('PlayerID', keep=False, inplace=False)
+    ### now add the total values back on to df_with_no_dupes
+    to_append = []
+    for pid in players_traded:
+        rows = df[df['PlayerID']==pid]
+        assert rows.shape[0] > 1, "Got a dupilicate PlayerID but only one row..."
+        new_row = combine_traded_player(rows)
+        to_append.append(new_row)
+    df_with_no_dupes = df_with_no_dupes.append(to_append, ignore_index=True, sort=False)
+
+    return df_with_no_dupes, rookie_ids, next_veteran_ids
+#     return df, rookie_ids, next_veteran_ids
+
+
+
 
 # +
 yearly_files = sorted(glob('yearly_player_stats/*.csv'))
@@ -514,19 +651,33 @@ veteran_ids = np.intersect1d(year_one_ids, year_two_ids)
 previous_rookie_ids = np.setdiff1d(year_two_ids, year_one_ids)
 
 yearly_files = yearly_files[2:]
-# -
 
+# +
 yearly_data = {}
-for fname in tqdm(yearly_files):
+for fname in yearly_files:
     year = int(fname.split('_')[-1].split('.')[0])
+    print("Starting {}...".format(year))
+
     df, previous_rookie_ids, veteran_ids = read_and_clean_yearly_stats(
         fname, year, veteran_ids, previous_rookie_ids)
     
     yearly_data[year] = df
+        
 all_years = pd.concat(yearly_data.values())
+# -
+
+# ### A few plots of all the data I just read in
+
+# +
+## quick test with Kevin Durant:
+fig = plt.figure(figsize=(13, 5))
+ax = plt.gca()
 
 loc = all_years['PlayerID'] == 'duranke01'
-plt.plot(all_years['Year'].loc[loc], all_years['TotalValue'].loc[loc])
+ax.plot(all_years['Year'].loc[loc], all_years['TotalValue'].loc[loc])
+# -
+
+# ### Plot all the values over all time:
 
 # +
 fig = plt.figure(figsize=(13, 5))
@@ -559,37 +710,24 @@ for pid in tqdm(unique_players):
     output_row['CareerRegularSeasonValue'] = np.sum(rows['YearlyRegularSeasonValue'].values)
     output_row['CareerPlayoffValue'] = np.sum(rows['YearlyPlayoffsValue'].values)
     output_row['CareerAwardsValue'] = np.sum(rows['YearlyAwardsValue'].values)
-    output_row['RookieYear'] = rows['Year'].loc[rows['VeteranStatus']==0]
+    ryear = rows['Year'].loc[rows['VeteranStatus']==0].values
+    if ryear.size == 0:
+        ryear = -1
+    elif ryear.size == 1:
+        ryear = ryear[0]
+    else:
+        assert (ryear[0] == ryear).all(), "too many rookie years!"
+        ryear = ryear[0]
+    output_row['RookieYear'] = ryear
     player_dataset = player_dataset.append(output_row, ignore_index=True)
 
-
-def find_player_id(player_name):
-    possibilities = unique_players['PlayerName'] == player_name
-    if np.count_nonzero(possibilities) == 1:
-        return unique_players['PlayerID'].loc[possibilities].values[0]
-    elif np.count_nonzero(possibilities) > 1:
-        print("Many options:")
-        values = unique_players['CareerValue'].loc[possibilities]
-        pids = []
-        for index, row in unique_players.loc[possibilities].iterrows():
-            print('\t{} with a total value of {}'.format(row['PlayerID'], row['CareerValue']))
-            pids.append(row['PlayerID'].value)
-        print("Returning best career")
-        return pids[np.argmax(values)]
-    else:
-        print("No exact matches... possibilities:")
-        from fuzzywuzzy import process
-        possibilities = process.extract(player_name, unique_players['PlayerName'].values, limit=10)
-        for poss in possibilities:
-            print("\t",poss[0])
-        return None
-
+player_dataset['RookieYear']
 
 # +
 xticks = range(0, 30, 5)
 xticklabels = [str(ii) for ii in range(1990, 2021, 5)]
 
-def plot_player_track(pid, y='TotalValue'):
+def plot_player_track_over_all(pid, y='TotalValue'):
     fig = plt.figure(figsize=(13, 5))
     ax = plt.gca()
 
@@ -597,13 +735,23 @@ def plot_player_track(pid, y='TotalValue'):
     name = all_years['PlayerName'].loc[loc].values[0]
     sns.boxplot(data=all_years, x='Year', y=y, ax=ax)
 
-    ax.plot(all_years['Year'].loc[loc], all_years[y].loc[loc], label=name)
+    xvals = years_to_xvals(all_years['Year'].loc[loc])
+    ax.plot(xvals, all_years[y].loc[loc], 
+            label=name, lw=4, color='k', zorder=99)
+    
+    leg = ax.legend()
     
     ax.set_xticks(xticks)
     ax.set_xticklabels(xticklabels)
+    
+    print(xticks)
+    print(xvals)
+
+
 # -
 
-
+pid = find_player_id('Kevin Durant')
+plot_player_track_over_all(pid)
 
 # ### OK, I'm not sure if this is a great way to value players yet, but let's forge ahead anyway!
 #
@@ -616,8 +764,31 @@ def plot_player_track(pid, y='TotalValue'):
 #
 # So I'll need to sort by the total value of a player and then pick ever Nth or something
 
+player_dataset.sort_values('CareerValue', inplace=True, ascending=False)
+
 player_dataset
 
-(player_dataset['CareerPlayoffValue'] == 0).all()
+# +
+test_train_ratio = 8
+
+players_to_testtrain = player_dataset.loc[]
+
+train_msk = np.mod(np.arange(players_to_testtrain.index.size),test_train_ratio) != 0
+
+train_dataset = players_to_testtrain[train_msk]
+test_dataset = players_to_testtrain[np.logical_not(train_msk)]
+
+train_pids = train_dataset['PlayerID']
+test_pids = test_dataset['PlayerID']
+
+print("Training dataset includes {} players; test dataset includes {}".format(
+    train_pids.size, test_pids.size))
 
 
+# -
+
+def get_features_values(pids, features=stat_keys, value='CareerValue'):
+    output_features = {}
+    for stat in stat_keys:
+        for pid in pids:
+            rookie_season = player_dataset['RookieSeason'].loc[]
