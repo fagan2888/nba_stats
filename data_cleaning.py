@@ -25,10 +25,17 @@ import matplotlib.pyplot as plt
 import datetime
 
 import tensorflow as tf
+from tensorflow.python.data import Dataset
+tf.logging.set_verbosity(tf.logging.ERROR)
+
+from sklearn import metrics
+import keras
 
 from tqdm import tqdm
 from glob import glob
 import os, sys
+
+from collections import OrderedDict
 
 # %matplotlib inline
 # -
@@ -257,7 +264,8 @@ def find_player_id(player_name):
         possibilities = process.extract(player_name, player_dataset['PlayerName'].values, limit=10)
         for poss in possibilities:
             print("\t",poss[0])
-        return None
+        print("Returning best match, but maybe incorrect...")
+        return find_player_id(possibilities[0][0])
 
 
 # ## Read info about teams that made it to the finals, players that are in the HOF, MVP winners, players that made All-NBA and All-Star teams, DPOYs, and Sixth man awards
@@ -288,7 +296,7 @@ sixth_man_winners['Year'] = sixth_man_winners['Season'].apply(lambda x: int(x.sp
 sixth_man_winners.set_index('Year', inplace=True)
 sixth_man_winners.drop(columns=['Lg', 'Voting', 'Season'], inplace=True)
 
-all_star_pids = {1999:np.array([])}  ### no all-star game in 1999
+all_star_pids = {1999:np.array([None])}  ### no all-star game in 1999
 all_star_files = sorted(glob('all_stars/*.csv'))
 for fname in all_star_files:
     year = int(fname.split('/')[-1].split('.')[0])
@@ -710,6 +718,7 @@ for pid in tqdm(unique_players):
     output_row['CareerRegularSeasonValue'] = np.sum(rows['YearlyRegularSeasonValue'].values)
     output_row['CareerPlayoffValue'] = np.sum(rows['YearlyPlayoffsValue'].values)
     output_row['CareerAwardsValue'] = np.sum(rows['YearlyAwardsValue'].values)
+    output_row['NumberOfYears'] = rows.shape[0]
     ryear = rows['Year'].loc[rows['VeteranStatus']==0].values
     if ryear.size == 0:
         ryear = -1
@@ -719,9 +728,11 @@ for pid in tqdm(unique_players):
         assert (ryear[0] == ryear).all(), "too many rookie years!"
         ryear = ryear[0]
     output_row['RookieYear'] = ryear
+    
+#     if 
+#     output_row['InNBAFirstTwoYears'] =     
+    
     player_dataset = player_dataset.append(output_row, ignore_index=True)
-
-player_dataset['RookieYear']
 
 # +
 xticks = range(0, 30, 5)
@@ -743,14 +754,47 @@ def plot_player_track_over_all(pid, y='TotalValue'):
     
     ax.set_xticks(xticks)
     ax.set_xticklabels(xticklabels)
-    
-    print(xticks)
-    print(xvals)
 
 
 # -
 
 pid = find_player_id('Kevin Durant')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('LeBron James')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Chris Paul')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('James Harden')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Blake Griffin')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Andrew Wiggins')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Karl-Anthony Towns')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Draymond Green')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Michael Jordan')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Ray Allen')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Kevin Garnett')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Karl Malone')
+plot_player_track_over_all(pid)
+
+pid = find_player_id('Magic Johnson')
 plot_player_track_over_all(pid)
 
 # ### OK, I'm not sure if this is a great way to value players yet, but let's forge ahead anyway!
@@ -766,29 +810,206 @@ plot_player_track_over_all(pid)
 
 player_dataset.sort_values('CareerValue', inplace=True, ascending=False)
 
-player_dataset
-
 # +
-test_train_ratio = 8
+test_train_ratio = 9
 
-players_to_testtrain = player_dataset.loc[]
+### only going to test/train the model on players that started on or before 2012
+## not long enough to know their career worth otherwise!
+players_to_testtrain = player_dataset[(player_dataset['NumberOfYears'] >= 4) & 
+                                      (player_dataset['RookieYear']>0)]
 
 train_msk = np.mod(np.arange(players_to_testtrain.index.size),test_train_ratio) != 0
+test_msk = np.logical_not(train_msk)
+validate_indices = np.where(test_msk)[0]+1
+validate_msk = np.zeros(train_msk.size, dtype=bool)
+validate_msk[validate_indices] = True
+train_msk[validate_msk] = False
+
+assert (train_msk | test_msk | validate_msk).all()
 
 train_dataset = players_to_testtrain[train_msk]
-test_dataset = players_to_testtrain[np.logical_not(train_msk)]
+test_dataset = players_to_testtrain[test_msk]
+validate_dataset = players_to_testtrain.iloc[validate_msk]
 
 train_pids = train_dataset['PlayerID']
 test_pids = test_dataset['PlayerID']
+validate_pids = validate_dataset['PlayerID']
 
-print("Training dataset includes {} players; test dataset includes {}".format(
-    train_pids.size, test_pids.size))
+assert train_pids.size + test_pids.size + validate_pids.size == players_to_testtrain.shape[0]
+
+print("Training dataset includes {} players; test dataset includes {}; validation dataset includes {}".format(
+    train_pids.size, test_pids.size, validate_pids.size))
+# -
+
+feature_columns = list(stat_keys) + ['eFG%', '3P%', 'FG%']
+
+
+def get_features_values(pids, career_df, yearly_dfs, 
+                        feature_columns, target_value='CareerValue',
+                        add_rookie_year_to_features=True):
+
+    output_features = OrderedDict()
+    output_values = np.zeros(pids.size, dtype=float)    
+    
+    rookie_years = np.zeros(pids.size, dtype=int)
+    for stat in feature_columns:
+        output_features[stat] = np.zeros(pids.size)
+        for ii, pid in enumerate(pids):
+            rookie_year = int(career_df['RookieYear'].loc[career_df['PlayerID']==pid])
+            rookie_years[ii] = rookie_year
+            
+            rookie_year_df = yearly_dfs[rookie_year]
+            
+            v = rookie_year_df[stat].loc[rookie_year_df['PlayerID']==pid].values
+            assert v.size == 1
+            output_features[stat][ii] = v[0]
+            if stat == feature_columns[0]:
+                v = career_df[target_value].loc[career_df['PlayerID']==pid].values
+                assert v.size == 1
+                output_values[ii] = v[0]
+        
+    if add_rookie_year_to_features:
+        output_features['RookieYear'] = rookie_years
+#         for year in range(1988, 2020):
+#             vals = np.zeros(pids.size, dtype=int)
+#             indices = rookie_years == year
+#             vals[indices] = 1
+#             output_features['RookieIn{}'.format(year)] = vals
+    
+    output_feature_df = pd.DataFrame(output_features)
+    output_values_df = pd.DataFrame(dict(target_value=output_values))
+
+    return output_feature_df, output_values_df
+
+
+# +
+training_features, training_output = get_features_values(train_pids, players_to_testtrain, yearly_data, feature_columns)
+test_features, test_output = get_features_values(test_pids, players_to_testtrain, yearly_data, feature_columns)
+validation_features, validation_output = get_features_values(validate_pids, players_to_testtrain, yearly_data, feature_columns)
+
+
+for df in [training_features, test_features, validation_features]:
+    df.fillna(0, inplace=True)
+
+# +
+tf_feature_columns = set([
+    tf.feature_column.numeric_column(cname.replace('%', '_PCT')) 
+    for cname in feature_columns])
+
+boundaries = np.arange(1989.5, 2019.5)
+rookie_year_column = tf.feature_column.numeric_column('RookieYear')
+tf_feature_columns.add(tf.feature_column.bucketized_column(
+    source_column=rookie_year_column, 
+    boundaries=list(boundaries)))
 
 
 # -
 
-def get_features_values(pids, features=stat_keys, value='CareerValue'):
-    output_features = {}
-    for stat in stat_keys:
-        for pid in pids:
-            rookie_season = player_dataset['RookieSeason'].loc[]
+# At this point, I need to do a fair bit of copy-pasting from the Google Machine Learning Crash Course :/ 
+
+def convert_df_to_features_labels(feature_df, target_df, 
+                                  batch_size=1, shuffle=True,
+                                 num_epochs=None):
+    
+    feature_dictionary = {key.replace('%','_PCT'):np.array(value) 
+                          for key, value in dict(feature_df).items()}
+    
+    targets = target_df[target_df.keys()[0]].values
+    
+    # Construct a dataset, and configure batching/repeating.
+    ds = Dataset.from_tensor_slices((feature_dictionary, targets))
+    ds = ds.batch(batch_size).repeat(num_epochs)
+    
+    if shuffle:
+        ds.shuffle(10000)
+        
+    features, labels = ds.make_one_shot_iterator().get_next()
+    return features, labels   
+
+
+def train_model(learning_rate, 
+               steps,
+               batch_size,
+               training_input_dataframe,
+               training_target_dataframe,
+               test_input_dataframe,
+               test_target_dataframe):
+    
+    periods = 10
+    steps_per_period = steps / periods
+    
+    training_targets = training_target_dataframe[training_target_dataframe.keys()[0]].values
+    test_targets = test_target_dataframe[test_target_dataframe.keys()[0]].values
+    
+    my_optimizer = tf.train.GradientDescentOptimizer(
+        learning_rate=learning_rate)
+    
+    my_optimizer = tf.contrib.estimator.clip_gradients_by_norm(
+        my_optimizer, 5.0)
+    
+    linear_regressor = tf.estimator.LinearRegressor(
+      feature_columns=tf_feature_columns, optimizer=my_optimizer)
+    
+    training_input_function = lambda:  convert_df_to_features_labels(
+        training_input_dataframe, training_target_dataframe, 
+        batch_size=batch_size)
+    
+    predict_training_input_fn = lambda:  convert_df_to_features_labels(
+        training_input_dataframe, training_target_dataframe, 
+        num_epochs=1, shuffle=False)
+    
+    predict_test_input_fn = lambda:  convert_df_to_features_labels(
+        test_input_dataframe, test_target_dataframe, 
+        num_epochs=1, shuffle=False)
+    
+    print("Training model...")
+    print("RMSE (on training data):")
+    training_rmse = []
+    test_rmse = []
+    
+    for period in range(periods):
+        linear_regressor.train(input_fn=training_input_function,
+                              steps=steps_per_period)
+        
+        # Take a break and compute predictions.
+        training_predictions = linear_regressor.predict(input_fn=predict_training_input_fn)
+        training_predictions = np.array([item['predictions'][0] for item in training_predictions])
+
+        test_predictions = linear_regressor.predict(input_fn=predict_test_input_fn)
+        test_predictions = np.array([item['predictions'][0] for item in test_predictions])
+
+        # Compute training and validation loss.
+        training_root_mean_squared_error = np.sqrt(
+            metrics.mean_squared_error(training_predictions, training_targets))
+        test_root_mean_squared_error = np.sqrt(
+            metrics.mean_squared_error(test_predictions, test_targets))
+        # Occasionally print the current loss.
+        print("  period %02d : %0.2f" % (period, training_root_mean_squared_error))
+        # Add the loss metrics from this period to our list.
+        training_rmse.append(training_root_mean_squared_error)
+        test_rmse.append(test_root_mean_squared_error)
+    print("Model training finished.")
+  
+    # Output a graph of loss metrics over periods.
+    plt.ylabel("RMSE")
+    plt.xlabel("Periods")
+    plt.title("Root Mean Squared Error vs. Periods")
+    plt.tight_layout()
+    plt.plot(training_rmse, label="training")
+    plt.plot(test_rmse, label="validation")
+    plt.legend()
+
+    return linear_regressor
+
+
+
+trained_regressor = train_model(learning_rate=0.001,
+                       steps=100000, batch_size=100,
+                       training_input_dataframe=training_features, 
+                       training_target_dataframe=training_output,
+                       test_input_dataframe=test_features, 
+                       test_target_dataframe=test_output)
+
+
+
+
