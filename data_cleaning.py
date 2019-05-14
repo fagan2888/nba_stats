@@ -26,10 +26,14 @@ import datetime
 
 import tensorflow as tf
 from tensorflow.python.data import Dataset
+
+
 tf.logging.set_verbosity(tf.logging.ERROR)
 
 from sklearn import metrics
-import keras
+# import keras
+from tensorflow import keras
+from tensorflow.keras import layers, regularizers
 
 from tqdm import tqdm
 from glob import glob
@@ -811,34 +815,38 @@ plot_player_track_over_all(pid)
 player_dataset.sort_values('CareerValue', inplace=True, ascending=False)
 
 # +
-test_train_ratio = 9
+test_validate_ratio = 9
 
 ### only going to test/train the model on players that started on or before 2012
 ## not long enough to know their career worth otherwise!
-players_to_testtrain = player_dataset[(player_dataset['NumberOfYears'] >= 4) & 
-                                      (player_dataset['RookieYear']>0)]
+players_to_testtrain = player_dataset[(player_dataset['RookieYear']<2012)&(player_dataset['RookieYear']>0)]
 
-train_msk = np.mod(np.arange(players_to_testtrain.index.size),test_train_ratio) != 0
-test_msk = np.logical_not(train_msk)
-validate_indices = np.where(test_msk)[0]+1
-validate_msk = np.zeros(train_msk.size, dtype=bool)
-validate_msk[validate_indices] = True
-train_msk[validate_msk] = False
-
-assert (train_msk | test_msk | validate_msk).all()
+### split into a train and validate dataset -- Keras will split train into train/test for me
+train_msk = np.mod(np.arange(players_to_testtrain.shape[0]),test_validate_ratio) != 0
+validate_msk = np.logical_not(train_msk)
+# test_msk = np.logical_not(train_msk)
+# validate_indices = np.where(test_msk)[0]+1
+# validate_msk = np.zeros(train_msk.size, dtype=bool)
+# validate_msk[validate_indices] = True
+# train_msk[validate_msk] = False
+# assert (train_msk | test_msk | validate_msk).all()
 
 train_dataset = players_to_testtrain[train_msk]
-test_dataset = players_to_testtrain[test_msk]
-validate_dataset = players_to_testtrain.iloc[validate_msk]
+# test_dataset = players_to_testtrain[test_msk]
+validate_dataset = players_to_testtrain[validate_msk]
 
 train_pids = train_dataset['PlayerID']
-test_pids = test_dataset['PlayerID']
+# test_pids = test_dataset['PlayerID']
 validate_pids = validate_dataset['PlayerID']
 
-assert train_pids.size + test_pids.size + validate_pids.size == players_to_testtrain.shape[0]
+# assert train_pids.size + test_pids.size + validate_pids.size == players_to_testtrain.shape[0]
+# print("Training dataset includes {} players; test dataset includes {}; validation dataset includes {}".format(
+#     train_pids.size, test_pids.size, validate_pids.size))
 
-print("Training dataset includes {} players; test dataset includes {}; validation dataset includes {}".format(
-    train_pids.size, test_pids.size, validate_pids.size))
+assert train_pids.size + validate_pids.size == players_to_testtrain.shape[0]
+print("Training dataset includes {} players; validation dataset includes {}".format(
+    train_pids.size, validate_pids.size))
+
 # -
 
 feature_columns = list(stat_keys) + ['eFG%', '3P%', 'FG%']
@@ -884,14 +892,16 @@ def get_features_values(pids, career_df, yearly_dfs,
 
 # +
 training_features, training_output = get_features_values(train_pids, players_to_testtrain, yearly_data, feature_columns)
-test_features, test_output = get_features_values(test_pids, players_to_testtrain, yearly_data, feature_columns)
+# test_features, test_output = get_features_values(test_pids, players_to_testtrain, yearly_data, feature_columns)
 validation_features, validation_output = get_features_values(validate_pids, players_to_testtrain, yearly_data, feature_columns)
 
-
-for df in [training_features, test_features, validation_features]:
+for df in [training_features, validation_features]:  #, test_features]:
     df.fillna(0, inplace=True)
 
-# +
+# + {"heading_collapsed": true, "cell_type": "markdown"}
+# ### Let's try to train the model using Tensorflow directly:
+
+# + {"hidden": true}
 tf_feature_columns = set([
     tf.feature_column.numeric_column(cname.replace('%', '_PCT')) 
     for cname in feature_columns])
@@ -903,10 +913,10 @@ tf_feature_columns.add(tf.feature_column.bucketized_column(
     boundaries=list(boundaries)))
 
 
-# -
-
+# + {"hidden": true, "cell_type": "markdown"}
 # At this point, I need to do a fair bit of copy-pasting from the Google Machine Learning Crash Course :/ 
 
+# + {"hidden": true}
 def convert_df_to_features_labels(feature_df, target_df, 
                                   batch_size=1, shuffle=True,
                                  num_epochs=None):
@@ -927,6 +937,7 @@ def convert_df_to_features_labels(feature_df, target_df,
     return features, labels   
 
 
+# + {"hidden": true}
 def train_model(learning_rate, 
                steps,
                batch_size,
@@ -935,14 +946,17 @@ def train_model(learning_rate,
                test_input_dataframe,
                test_target_dataframe):
     
-    periods = 10
+    periods = 50
     steps_per_period = steps / periods
     
     training_targets = training_target_dataframe[training_target_dataframe.keys()[0]].values
     test_targets = test_target_dataframe[test_target_dataframe.keys()[0]].values
     
-    my_optimizer = tf.train.GradientDescentOptimizer(
-        learning_rate=learning_rate)
+#     my_optimizer = tf.train.GradientDescentOptimizer(
+#         learning_rate=learning_rate)
+
+    my_optimizer = tf.train.FtrlOptimizer(learning_rate=learning_rate,
+                                         l2_regularization_strength=5)
     
     my_optimizer = tf.contrib.estimator.clip_gradients_by_norm(
         my_optimizer, 5.0)
@@ -984,13 +998,15 @@ def train_model(learning_rate,
         test_root_mean_squared_error = np.sqrt(
             metrics.mean_squared_error(test_predictions, test_targets))
         # Occasionally print the current loss.
-        print("  period %02d : %0.2f" % (period, training_root_mean_squared_error))
+        print("  period %02d : %0.2f" % (period, training_root_mean_squared_error), flush=True)
         # Add the loss metrics from this period to our list.
         training_rmse.append(training_root_mean_squared_error)
         test_rmse.append(test_root_mean_squared_error)
     print("Model training finished.")
   
     # Output a graph of loss metrics over periods.
+    fig = plt.figure()
+    ax = plt.gca()
     plt.ylabel("RMSE")
     plt.xlabel("Periods")
     plt.title("Root Mean Squared Error vs. Periods")
@@ -1002,14 +1018,107 @@ def train_model(learning_rate,
     return linear_regressor
 
 
-
-trained_regressor = train_model(learning_rate=0.001,
-                       steps=100000, batch_size=100,
+# + {"hidden": true}
+trained_regressor = train_model(learning_rate=0.00001,
+                       steps=10000, batch_size=100,
                        training_input_dataframe=training_features, 
                        training_target_dataframe=training_output,
                        test_input_dataframe=test_features, 
                        test_target_dataframe=test_output)
+# -
+
+# ### That's not working super well; let's try to use Keras instead
+
+# Encode the rookie year via 1-hot:
+
+years = range(1990, 2012)
+def encode_rookie_year(df):
+    ryear = df.pop('RookieYear')
+    for year in years:
+        df['RookieIn{}'.format(year)] = (ryear==year)*1.0
+    return df
 
 
+encoded_training_features = encode_rookie_year(training_features.copy())
+# encoded_test_features = encode_rookie_year(test_features)
+encoded_validation_features = encode_rookie_year(validation_features.copy())
+
+# Normalize the data:
+
+training_stats = encoded_training_features.describe()
+def norm(df):
+    normalized_df = pd.DataFrame()
+    for key in df:
+        normalized_df[key] = (df[key] - training_stats[key]['mean']) / training_stats[key]['std']
+    return normalized_df
+
+
+normalized_training_features = norm(encoded_training_features)
+# normalized_test_features = norm(encoded_test_features)
+normalized_validation_features = norm(encoded_validation_features)
+
+normalized_training_features
+
+
+def build_and_train_model(training_data, training_labels, 
+                          epochs=1000, learning_rate=0.001):
+    model = keras.Sequential([
+        layers.Dense(64, 
+                     activation=tf.nn.relu, 
+                     input_shape=[len(training_data.keys())]),
+        layers.Dense(64, activation=tf.nn.relu),
+        layers.Dense(1)
+    ])
+    
+    optimizer = tf.keras.optimizers.RMSprop(learning_rate)
+    
+    early_stopper = keras.callbacks.EarlyStopping(monitor='mean_absolute_error', patience=20, verbose=1)
+    nan_stopper = keras.callbacks.TerminateOnNaN()
+    cblist = [early_stopper, nan_stopper]
+    
+    model.compile(loss='mean_squared_error',
+                 optimizer=optimizer, 
+                 metrics=['mean_absolute_error', 'mean_squared_error'])
+
+    history = model.fit(
+        training_data, training_labels,
+        epochs=epochs, validation_split=0.2, verbose=1,
+        callbacks=cblist)
+    return model, history
+
+
+model, history = build_and_train_model(normalized_training_features, 
+                             training_output)
+
+
+# +
+def plot_history(history):
+    hist = pd.DataFrame(history.history)
+    hist['epoch'] = history.epoch
+
+    plt.figure()
+    plt.xlabel('Epoch')
+    plt.ylabel('Mean Abs Error [MPG]')
+    plt.plot(hist['epoch'], hist['mean_absolute_error'],
+           label='Train Error')
+    plt.plot(hist['epoch'], hist['val_mean_absolute_error'],
+           label = 'Val Error')
+#     plt.ylim([0,5])
+    plt.legend()
+
+    plt.figure()
+    plt.xlabel('Epoch')
+    plt.ylabel('Mean Square Error [$MPG^2$]')
+    plt.plot(hist['epoch'], hist['mean_squared_error'],
+           label='Train Error')
+    plt.plot(hist['epoch'], hist['val_mean_squared_error'],
+           label = 'Val Error')
+#     plt.ylim([0,20])
+    plt.legend()
+    plt.show()
+
+
+plot_history(history)
+# -
 
 
