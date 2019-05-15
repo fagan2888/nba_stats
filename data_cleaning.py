@@ -124,6 +124,18 @@ short_to_long = dict(zip(team_short_names, team_long_names))
 first_year = 1990
 years_to_xvals = lambda years: years - first_year
 
+class PrintCallback(keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs):
+        if epoch % 25 == 0:
+            print("epoch {}:  loss = {:.2f}, test loss = {:.2f}".format(
+                epoch, logs['loss'], logs['val_loss']))
+    def on_train_begin(self, logs={}):
+        print("Beginning training...")
+    
+    def on_train_end(self, logs):
+        print("Training completed")
+
+
 # +
 ## how do we weight stats when calculating a players value?  larger number = more weight
 stat_weights = {'PTS': 2.0, 
@@ -821,31 +833,33 @@ test_validate_ratio = 9
 ## not long enough to know their career worth otherwise!
 players_to_testtrain = player_dataset[(player_dataset['RookieYear']<2012)&(player_dataset['RookieYear']>0)]
 
-### split into a train and validate dataset -- Keras will split train into train/test for me
+### split into train, test, and validate datasets
 train_msk = np.mod(np.arange(players_to_testtrain.shape[0]),test_validate_ratio) != 0
-validate_msk = np.logical_not(train_msk)
-# test_msk = np.logical_not(train_msk)
-# validate_indices = np.where(test_msk)[0]+1
-# validate_msk = np.zeros(train_msk.size, dtype=bool)
-# validate_msk[validate_indices] = True
-# train_msk[validate_msk] = False
-# assert (train_msk | test_msk | validate_msk).all()
+test_msk = np.logical_not(train_msk)
+
+validate_indices = np.where(test_msk)[0][:-1]+1
+validate_msk = np.zeros(train_msk.size, dtype=bool)
+validate_msk[validate_indices] = True
+
+train_msk[validate_msk] = False
+
+assert (train_msk | test_msk | validate_msk).all()
 
 train_dataset = players_to_testtrain[train_msk]
-# test_dataset = players_to_testtrain[test_msk]
+test_dataset = players_to_testtrain[test_msk]
 validate_dataset = players_to_testtrain[validate_msk]
 
 train_pids = train_dataset['PlayerID']
-# test_pids = test_dataset['PlayerID']
+test_pids = test_dataset['PlayerID']
 validate_pids = validate_dataset['PlayerID']
 
-# assert train_pids.size + test_pids.size + validate_pids.size == players_to_testtrain.shape[0]
-# print("Training dataset includes {} players; test dataset includes {}; validation dataset includes {}".format(
-#     train_pids.size, test_pids.size, validate_pids.size))
+assert train_pids.size + test_pids.size + validate_pids.size == players_to_testtrain.shape[0]
+print("Training dataset includes {} players; test dataset includes {}; validation dataset includes {}".format(
+    train_pids.size, test_pids.size, validate_pids.size))
 
-assert train_pids.size + validate_pids.size == players_to_testtrain.shape[0]
-print("Training dataset includes {} players; validation dataset includes {}".format(
-    train_pids.size, validate_pids.size))
+# assert train_pids.size + validate_pids.size == players_to_testtrain.shape[0]
+# print("Training dataset includes {} players; validation dataset includes {}".format(
+#     train_pids.size, validate_pids.size))
 
 # -
 
@@ -892,10 +906,10 @@ def get_features_values(pids, career_df, yearly_dfs,
 
 # +
 training_features, training_output = get_features_values(train_pids, players_to_testtrain, yearly_data, feature_columns)
-# test_features, test_output = get_features_values(test_pids, players_to_testtrain, yearly_data, feature_columns)
+test_features, test_output = get_features_values(test_pids, players_to_testtrain, yearly_data, feature_columns)
 validation_features, validation_output = get_features_values(validate_pids, players_to_testtrain, yearly_data, feature_columns)
 
-for df in [training_features, validation_features]:  #, test_features]:
+for df in [training_features, validation_features, test_features]:
     df.fillna(0, inplace=True)
 
 # + {"heading_collapsed": true, "cell_type": "markdown"}
@@ -1040,7 +1054,7 @@ def encode_rookie_year(df):
 
 
 encoded_training_features = encode_rookie_year(training_features.copy())
-# encoded_test_features = encode_rookie_year(test_features)
+encoded_test_features = encode_rookie_year(test_features.copy())
 encoded_validation_features = encode_rookie_year(validation_features.copy())
 
 # Normalize the data:
@@ -1054,69 +1068,63 @@ def norm(df):
 
 
 normalized_training_features = norm(encoded_training_features)
-# normalized_test_features = norm(encoded_test_features)
+normalized_test_features = norm(encoded_test_features)
 normalized_validation_features = norm(encoded_validation_features)
 
-normalized_training_features
+# + {"code_folding": []}
 
 
 def build_and_train_model(training_data, training_labels, 
-                          epochs=1000, learning_rate=0.001):
+                          test_data, test_labels,
+                          epochs=250, learning_rate=0.003):
+    
     model = keras.Sequential([
-        layers.Dense(64, 
-                     activation=tf.nn.relu, 
-                     input_shape=[len(training_data.keys())]),
-        layers.Dense(64, activation=tf.nn.relu),
-        layers.Dense(1)
+        layers.Dense(512, input_shape=[len(training_data.keys())],
+                    kernel_regularizer=tf.keras.regularizers.l2(0.1),
+                    activation=tf.nn.relu),
+        layers.Dense(40),
+        layers.Dense(1, activation='linear')
     ])
     
     optimizer = tf.keras.optimizers.RMSprop(learning_rate)
     
-    early_stopper = keras.callbacks.EarlyStopping(monitor='mean_absolute_error', patience=20, verbose=1)
+    early_stopper = keras.callbacks.EarlyStopping(
+        monitor='loss', patience=50, verbose=1)
     nan_stopper = keras.callbacks.TerminateOnNaN()
-    cblist = [early_stopper, nan_stopper]
+    cblist = [early_stopper, nan_stopper, PrintCallback()]
     
-    model.compile(loss='mean_squared_error',
+    model.compile(loss='mae',
                  optimizer=optimizer, 
-                 metrics=['mean_absolute_error', 'mean_squared_error'])
+                 metrics=['mse', 'mae', 'msle'])
 
     history = model.fit(
         training_data, training_labels,
-        epochs=epochs, validation_split=0.2, verbose=1,
-        callbacks=cblist)
+        validation_data=(test_data, test_labels),
+        epochs=epochs, verbose=0, callbacks=cblist)
     return model, history
 
 
-model, history = build_and_train_model(normalized_training_features, 
-                             training_output)
+# -
+
+model, history = build_and_train_model(normalized_training_features, training_output, 
+                                       normalized_test_features, test_output)
 
 
-# +
+# + {"code_folding": [0]}
 def plot_history(history):
     hist = pd.DataFrame(history.history)
     hist['epoch'] = history.epoch
 
-    plt.figure()
-    plt.xlabel('Epoch')
-    plt.ylabel('Mean Abs Error [MPG]')
-    plt.plot(hist['epoch'], hist['mean_absolute_error'],
-           label='Train Error')
-    plt.plot(hist['epoch'], hist['val_mean_absolute_error'],
-           label = 'Val Error')
-#     plt.ylim([0,5])
-    plt.legend()
-
-    plt.figure()
-    plt.xlabel('Epoch')
-    plt.ylabel('Mean Square Error [$MPG^2$]')
-    plt.plot(hist['epoch'], hist['mean_squared_error'],
-           label='Train Error')
-    plt.plot(hist['epoch'], hist['val_mean_squared_error'],
-           label = 'Val Error')
-#     plt.ylim([0,20])
-    plt.legend()
-    plt.show()
-
+    keys = [k for k in history.history.keys() if not k.startswith('val_')]
+    for key in keys:
+        plt.figure()
+        plt.xlabel('Epoch')
+        plt.ylabel(key)
+        plt.plot(hist['epoch'], hist[key],
+               label='Train Error')
+        plt.plot(hist['epoch'], hist['val_'+key],
+               label = 'Test Error')
+        plt.legend()
 
 plot_history(history)
 # -
