@@ -1,3 +1,6 @@
+# skip the stats that have been semi-illicitly obtained
+scraped/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
