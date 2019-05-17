@@ -87,7 +87,7 @@ for year in range(1950, 2019):
     print(f"Downloaded stats for {year}")
 # -
 
-for year in range(1950, 2019):
+for year in range(1975, 2019):
     if year == 1954:
         print("Skipping 1954")
         continue
