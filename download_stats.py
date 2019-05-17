@@ -73,21 +73,22 @@ def download_yearly_stats(year, return_download_tables=False):
     if not os.path.isfile(output_file_path):
         downloaded_tables['totals'] = client.players_season_totals(year, output_type='csv', 
                                      output_file_path=output_base+f'/stats_by_year/{year}_totals.csv')
+        wait_random_time()
         
     output_file_path = output_base+f'/stats_by_year/{year}_advanced.csv'
     if not os.path.isfile(output_file_path):
         downloaded_tables['advanced'] = client.players_advanced_stats(year, output_type='csv', 
                                      output_file_path=output_base+f'/stats_by_year/{year}_advanced.csv')
-        
+        wait_random_time()
     if return_download_tables:
         return downloaded_tables
 
 for year in range(1950, 2019):
     download_yearly_stats(year)
-    print(f"Downloaded stats for {year}")
+    print(f"Done with stats for {year}")
 # -
 
-for year in range(1975, 2019):
+for year in range(1950, 2019):
     if year == 1954:
         print("Skipping 1954")
         continue
@@ -151,8 +152,11 @@ def combine_series_by_round(year):
 
 # -
 
-for year in range(1950, 1954):
+for year in range(1950, 2019):
     combine_series_by_round(year)
+
+## had to redo 2018:
+combine_series_by_round(2018)
 
 # +
 ### doing all the playoff series
