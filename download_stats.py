@@ -28,6 +28,7 @@ import time
 import copy
 import glob
 import shutil
+import tqdm
 
 user_agent_list = [   #Chrome
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.113 Safari/537.36',
@@ -58,7 +59,9 @@ user_agent_list = [   #Chrome
 
 output_base = 'scraped/'
 
-def wait_random_time(max_wait_seconds=22.25):
+def wait_random_time(max_wait_seconds=10.25):
+    import random
+    import time
     ### wait some period of time and set a new user agent string
     seconds_to_wait = random.random()*max_wait_seconds
     time.sleep(seconds_to_wait)
@@ -72,21 +75,52 @@ def download_yearly_stats(year, return_download_tables=False):
     output_file_path = output_base+f'/stats_by_year/{year}_totals.csv'
     if not os.path.isfile(output_file_path):
         downloaded_tables['totals'] = client.players_season_totals(year, output_type='csv', 
-                                     output_file_path=output_base+f'/stats_by_year/{year}_totals.csv')
+                                     output_file_path=output_file_path)
         wait_random_time()
-        
+                
     output_file_path = output_base+f'/stats_by_year/{year}_advanced.csv'
     if not os.path.isfile(output_file_path):
         downloaded_tables['advanced'] = client.players_advanced_stats(year, output_type='csv', 
-                                     output_file_path=output_base+f'/stats_by_year/{year}_advanced.csv')
+                                     output_file_path=output_file_path)
         wait_random_time()
+        
+    ### repeat for the playoffs:
+    output_file_path = output_base+f'/stats_by_year/{year}_playoffs_totals.csv'
+    if not os.path.isfile(output_file_path):
+        downloaded_tables['totals.playoffs'] = client.players_season_totals(year, playoffs=True, output_type='csv', 
+                                     output_file_path=output_file_path)
+        wait_random_time()
+        
+    output_file_path = output_base+f'/stats_by_year/{year}_playoffs_advanced.csv'
+    if not os.path.isfile(output_file_path):
+        downloaded_tables['advanced.playoffs'] = client.players_advanced_stats(year, playoffs=True, output_type='csv', 
+                                     output_file_path=output_file_path)
+        wait_random_time()        
+
+    ## now do the per 100 if they're aviailable
+    if year >= 1974:
+        output_file_path = output_base+f'/stats_by_year/{year}_per100.csv'
+        if not os.path.isfile(output_file_path):
+            downloaded_tables['per100'] = client.players_season_totals_per100(year, output_type='csv', 
+                                         output_file_path=output_file_path)
+            wait_random_time()   
+
+        output_file_path = output_base+f'/stats_by_year/{year}_playoffs_per100.csv'
+        if not os.path.isfile(output_file_path):
+            downloaded_tables['per100.playoffs'] = client.players_season_totals_per100(year, 
+                                       playoffs=True, output_type='csv', output_file_path=output_file_path)
+            wait_random_time()        
+        
+        
     if return_download_tables:
         return downloaded_tables
 
-for year in range(1950, 2019):
+for year in tqdm.tqdm(range(1950, 2019)):
     download_yearly_stats(year)
-    print(f"Done with stats for {year}")
+#     print(f"Done with stats for {year}")
 # -
+
+# ### Download series-by-series stats for the playoffs:
 
 for year in range(1950, 2019):
     if year == 1954:
