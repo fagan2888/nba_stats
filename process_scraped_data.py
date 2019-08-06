@@ -15,8 +15,6 @@
 
 # +
 from __future__ import print_function, division
-# %reload_ext autoreload
-# %autoreload 2
 
 from scipy.stats import gaussian_kde, kde
 import pandas as pd
@@ -37,8 +35,8 @@ import datetime
 import os, sys
 from enum import Enum
 
-pd.options.display.max_rows = 15
-pd.options.display.max_columns = 20
+pd.options.display.max_rows = 30
+pd.options.display.max_columns = 50
 
 from collections import OrderedDict
 
@@ -97,10 +95,6 @@ class CyclicList(list):
         return super().__getitem__(index%len(self))
 
 
-# -
-
-np.average?
-
 # + {"code_folding": [0]}
 columns_to_rate = ['minutes_played', 'made_field_goals', 'attempted_field_goals', 
                   'made_three_point_field_goals', 'attempted_three_point_field_goals', 
@@ -118,11 +112,10 @@ def add_rate_stats(df, columns=columns_to_rate):
         df[column+'_per_36_minutes.playoffs'] = 36 * df[column+'.playoffs']/df['minutes_played.playoffs']        
     return df
 
-advanced_stats_to_combine = ['vorp', 'total_box_plus_minus', 
-                             'total_win_shares', 'total_win_shares_per_48',
-                            'offensive_rating', 'defensive_rating', 
-                            'effective_field_goal_percent', 'true_shooting_percent',
-                            ]
+
+advanced_stats_to_combine = ['vorp', 'total_box_plus_minus', 'player_efficiency_rating', 
+                             'true_shooting_percent', 'effective_field_goal_percent', 
+                             'total_win_shares', 'offensive_rating', 'defensive_rating']
 
 def add_combined_RSPO_stats(df, 
                              columns=advanced_stats_to_combine, 
@@ -213,6 +206,8 @@ def parse_year(year):
     ## now add combined regular season and playoff stats:
     out = add_combined_RSPO_stats(out)
     
+    out['primary_position'] = out['positions'].apply(lambda pos:  pos.split('-')[0])
+    
     return out
 
 
@@ -227,7 +222,7 @@ all_years = pd.concat(dataframes_by_year.values())
 all_years.sort_values(by='season_end_year', axis=0, inplace=True)
 # -
 
-# Note -- a lot of advanced stats are missing prior to 1974.  'win_shares' exists for all years, but vorp does not.
+# Note -- a lot of advanced stats are missing prior to 1974.  'win_shares' exists for all years, but vorp and BPM do not.
 
 all_years.shape
 
@@ -235,60 +230,59 @@ all_years.shape
 
 all_years.to_hdf('scraped/all_years_combined.hdf5', 'nba_stats')
 
-all_players = np.unique(all_years.index)
+print('\n'.join(all_years.keys()))
 
-all_years.keys()
+# ### Now let's calculate some career stats for the players:
 
-from sgklibs.histograms import anticum_hist
+all_players, num_years = np.unique(all_years.index, return_counts=True)
 
-# +
-fig = plt.figure(figsize=(13,13))
-ax = plt.gca()
-for year in years:
-    hist, bins = anticum_hist(all_years['points'][all_years['season_end_year']==year])
-    ax.loglog(bins, hist)
-
-ax.set(xlim)
-# -
-
-
+np.mode?
 
 # +
-fig = plt.figure(figsize=(13, 7))
-ax = plt.gca()
+keys_to_reduce = ['vorp', 'total_box_plus_minus', 'player_efficiency_rating',
+                  'true_shooting_percent', 'total_win_shares', 'offensive_rating',
+                 'defensive_rating']
 
-msk = (np.isfinite(all_years['points_per_game']))
-y = all_years['points_per_game'][msk]
-x = all_years['season_end_year'][msk]
+reductions = {'max':np.nanmax, 'mean':np.nanmean, 'median':np.nanmedian}
+player_rows = []
+for ii, (pid, nyears) in enumerate(tqdm(zip(all_players, num_years))):
+    rows = all_years.loc[pid]
+    one_year = False
+    if nyears == 1:
+        assert len(rows) == all_years.shape[1]
+        one_year = True
+    elif len(rows) == all_years.shape[1]:
+        assert nyears == 1
+        one_year = True
+    
+    if one_year:
+        pdata = dict(player_id=pid, player_name=rows['player_name'], career_length=1)
+    else:
+        pdata = dict(player_id=pid, player_name=rows['player_name'].iloc[0], career_length=len(rows))
+            
+    positions = rows['primary_position']
+    upos, counts = np.unique(positions, return_counts=True)
+    
+    pdata['primary_position'] = upos[np.argmax(counts)]
+    
+    pdata['rookie_end_year'] = np.min(rows['season_end_year'])
+    for key in keys_to_reduce:
+        for lab, func in reductions.items():
+            pdata[key+'-'+lab] = func(rows[key])
+            pdata[key+'.combined-'+lab] = func(rows[key+'.combined'])
+    player_rows.append(pdata)
 
-noise = np.random.random(x.size) - 0.5
-
-# sns.violinplot(x, y, cut=0, )
-
-# sns.kdeplot(x, y, shade=True, ax=ax, nlevels=128, cmap="viridis")
-
-hist = ax.hist2d(x+noise, y, norm=mpl.colors.LogNorm(), bins=150)
-
-# sns.boxplot(x, y, ax=ax)
-
-
-# xticklabels = ax.get_xticklabels()[::10]
-# ax.set_xticks(ax.get_xticks()[::10])
-# ax.set_xticklabels(xticklabels)
-
-# nbins=300
-# k = kde.gaussian_kde([x,y])
-# xi, yi = np.mgrid[x.min():x.max():nbins*1j, y.min():y.max():nbins*1j]
-# zi = k(np.vstack([xi.flatten(), yi.flatten()]))
- 
-# Make the plot
-# ax.pcolormesh(xi, yi, zi.reshape(xi.shape), norm=mpl.colors.LogNorm())
+player_df = pd.DataFrame(player_rows)
+player_df.set_index('player_id', inplace=True)
 # -
 
-loc = all_years['player_name'] == 'LeBron James'
-rows = all_years.loc[loc]
+player_df
 
-rows['player_name'].iloc[0]
+player_df.to_hdf('scraped/all_years_combined.hdf5', 'player_list')
+
+player_df.sort_values('vorp-median', ascending=False)
+
+# #### Now just to explore, let's make some plots
 
 markers = CyclicList(['s', 'v', 'd', 'h', 'o'])
 colors = CyclicList(sns.color_palette(n_colors=8))
@@ -377,6 +371,57 @@ fig, ax = plot_player_career_stat(all_years, stars,
                                   year_limits=[1973, 2018],
                                   ylim=[-15, 15],
                                  )
+
+from sgklibs.histograms import anticum_hist
+
+# +
+fig = plt.figure(figsize=(13,13))
+ax = plt.gca()
+for year in years:
+    hist, bins = anticum_hist(all_years['points'][all_years['season_end_year']==year])
+    ax.loglog(bins, hist)
+
+ax.set(xlim)
+# -
+
+
+
+# +
+fig = plt.figure(figsize=(13, 7))
+ax = plt.gca()
+
+msk = (np.isfinite(all_years['points_per_game']))
+y = all_years['points_per_game'][msk]
+x = all_years['season_end_year'][msk]
+
+noise = np.random.random(x.size) - 0.5
+
+# sns.violinplot(x, y, cut=0, )
+
+# sns.kdeplot(x, y, shade=True, ax=ax, nlevels=128, cmap="viridis")
+
+hist = ax.hist2d(x+noise, y, norm=mpl.colors.LogNorm(), bins=150)
+
+# sns.boxplot(x, y, ax=ax)
+
+
+# xticklabels = ax.get_xticklabels()[::10]
+# ax.set_xticks(ax.get_xticks()[::10])
+# ax.set_xticklabels(xticklabels)
+
+# nbins=300
+# k = kde.gaussian_kde([x,y])
+# xi, yi = np.mgrid[x.min():x.max():nbins*1j, y.min():y.max():nbins*1j]
+# zi = k(np.vstack([xi.flatten(), yi.flatten()]))
+ 
+# Make the plot
+# ax.pcolormesh(xi, yi, zi.reshape(xi.shape), norm=mpl.colors.LogNorm())
+# -
+
+loc = all_years['player_name'] == 'LeBron James'
+rows = all_years.loc[loc]
+
+rows['player_name'].iloc[0]
 
 
 
